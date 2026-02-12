@@ -300,7 +300,10 @@ def _stmt_to_command(stmt: dict[str, Any]) -> AstNode:
         return BackgroundNode(line_number=None, node=cmd, redir_list=redirs, no_braces=True)
 
     if redirs:
-        cmd = RedirNode(line_number=None, node=cmd, redir_list=redirs)
+        if isinstance(cmd, CommandNode):
+            cmd.redir_list.extend(redirs)
+        else:
+            cmd = RedirNode(line_number=None, node=cmd, redir_list=redirs)
 
     return cmd
 
@@ -476,6 +479,10 @@ def _func_decl_to_ast(node: dict[str, Any]) -> DefunNode:
     line_number = _line_from_pos(node.get("Position"))
     name = _lit_to_arg_chars(node.get("Name"))
     body = _stmt_to_command(node["Body"])
+    if isinstance(body, GroupNode):
+        # libdash-backed function bodies are emitted without an intermediate Group wrapper.
+        # Unwrap to keep downstream interpreter behavior compatible.
+        body = body.body
     return DefunNode(
         line_number=line_number if line_number is not None else -1,
         name=name,
@@ -526,10 +533,6 @@ def _word_to_arg_chars(word: dict[str, Any]) -> list[ArgChar]:
 
 
 def _word_part_to_arg_chars(part: dict[str, Any]) -> list[ArgChar]:
-    literal = _literal_from_node(part)
-    if literal is not None:
-        return _literal_word_part_chars(literal)
-
     part_type = part.get("Type")
     if part_type == "Lit":
         return _string_to_arg_chars(part.get("Value", ""))
@@ -557,10 +560,60 @@ def _word_part_to_arg_chars(part: dict[str, Any]) -> list[ArgChar]:
     if part_type == "BraceExp":
         return _literal_word_part_chars(_brace_exp_to_string(part))
 
+    literal = _literal_from_node(part)
+    if literal is not None:
+        return _literal_word_part_chars(literal)
+
     raise NotImplementedError(f"Unsupported word part: {part_type}")
 
 
 def _param_exp_to_arg_chars(node: dict[str, Any]) -> list[ArgChar]:
+    var = _param_name(node)
+    if var is None:
+        return _param_exp_literal_fallback(node)
+
+    # Keep advanced bash-only forms as literal text until typed equivalents are modeled.
+    if (
+        node.get("Flags")
+        or node.get("Excl")
+        or node.get("NestedParam")
+        or node.get("Index")
+        or node.get("Slice")
+        or node.get("Repl")
+        or node.get("Names")
+    ):
+        return _param_exp_literal_fallback(node)
+
+    if node.get("Length"):
+        return [VArgChar(fmt="Length", null=False, var=var, arg=[])]
+
+    exp = node.get("Exp")
+    if exp is None:
+        return [VArgChar(fmt="Normal", null=False, var=var, arg=[])]
+
+    op_name = PAR_EXP_OPS.get(exp.get("Op"))
+    fmt = PAR_EXP_TO_VAR_TYPE.get(op_name)
+    if fmt is None:
+        return _param_exp_literal_fallback(node)
+
+    word = exp.get("Word")
+    arg = _word_to_arg_chars(word) if word else []
+    return [VArgChar(fmt=fmt, null=op_name in PAR_EXP_NULL, var=var, arg=arg)]
+
+
+def _param_name(node: dict[str, Any]) -> str | None:
+    param = node.get("Param")
+    if isinstance(param, dict):
+        name = param.get("Value")
+        if isinstance(name, str):
+            return name
+    return None
+
+
+def _param_exp_literal_fallback(node: dict[str, Any]) -> list[ArgChar]:
+    literal = _literal_from_node(node)
+    if literal is not None:
+        return _literal_word_part_chars(literal)
     return _literal_word_part_chars(_param_exp_to_string(node))
 
 
