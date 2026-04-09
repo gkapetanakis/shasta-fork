@@ -1,16 +1,18 @@
 name: Test
-on: 
+on:
   pull_request_target:
     types: [assigned, opened, synchronize, reopened, ready_for_review]
-    paths: 
-        - shasta/**
+    paths:
+      - shasta/**
+      - tests/gosh_tests/**
   push:
     branches:
       - main
       - future
-    paths: 
+    paths:
       - libdash/**
       - shasta/**
+      - tests/gosh_tests/**
 jobs:
   Shasta-Test:
     strategy:
@@ -21,7 +23,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     if: github.event.pull_request.draft == false
     steps:
-      - uses: actions/checkout@v2 
+      - uses: actions/checkout@v2
         with:
           ref: ${{ github.event.pull_request.head.sha }}
       - name: Running Tests
