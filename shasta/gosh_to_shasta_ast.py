@@ -1021,37 +1021,89 @@ def _let_clause_to_ast(node: dict[str, Any]) -> CommandNode:
     return CommandNode(line_number=-1, assignments=[], arguments=args, redir_list=[])
 
 
-def _test_clause_to_ast(node: dict[str, Any]) -> CommandNode:
-    expr = node.get("X")
-    words = [_string_to_arg_chars("[[")]
-    words.extend(_test_expr_to_words(expr))
-    words.append(_string_to_arg_chars("]]"))
-    return CommandNode(line_number=-1, assignments=[], arguments=words, redir_list=[])
+def _test_clause_to_ast(node: dict[str, Any]) -> CondNode:
+    expr = cast(dict[str, Any], node.get("X"))
+    return _test_expr_to_cond(expr)
 
 
-def _test_expr_to_words(expr: dict[str, Any]) -> list[list[ArgChar]]:
+def _test_expr_to_cond(expr: dict[str, Any]) -> CondNode:
     etype = expr.get("Type")
     if etype == "Word":
-        return [_word_to_arg_chars(expr)]
+        return CondNode(
+            line_number=_line_from_pos(expr.get("Pos")) or -1,
+            cond_type=CondType.COND_TERM.value,
+            op=_word_to_arg_chars(expr),
+            left=None,
+            right=None,
+            invert_return=False,
+        )
     if etype == "UnaryTest":
-        op = UN_TEST_OPS.get(expr.get("Op"), "")
-        inner = _test_expr_to_words(expr.get("X"))
-        return [_string_to_arg_chars(op)] + inner
+        op_value = expr.get("Op")
+        op = UN_TEST_OPS.get(op_value) if isinstance(op_value, int) else ""
+        inner = _test_expr_to_cond(cast(dict[str, Any], expr.get("X")))
+        if op == "!":
+            inner.invert_return = not inner.invert_return
+            return inner
+        if not op:
+            raise NotImplementedError(f"Unsupported unary test op: {expr.get('Op')}")
+        return CondNode(
+            line_number=_line_from_pos(expr.get("Pos")) or -1,
+            cond_type=CondType.COND_UNARY.value,
+            op=_string_to_arg_chars(op),
+            left=inner,
+            right=None,
+            invert_return=False,
+        )
     if etype == "BinaryTest":
-        op = BIN_TEST_OPS.get(expr.get("Op"), "")
-        left = _test_expr_to_words(expr.get("X"))
-        right = _test_expr_to_words(expr.get("Y"))
-        return left + [_string_to_arg_chars(op)] + right
+        op_value = expr.get("Op")
+        op = BIN_TEST_OPS.get(op_value) if isinstance(op_value, int) else ""
+        left = _test_expr_to_cond(cast(dict[str, Any], expr.get("X")))
+        right = _test_expr_to_cond(cast(dict[str, Any], expr.get("Y")))
+        if op == "&&":
+            return CondNode(
+                line_number=_line_from_pos(expr.get("Pos")) or -1,
+                cond_type=CondType.COND_AND.value,
+                op=None,
+                left=left,
+                right=right,
+                invert_return=False,
+            )
+        if op == "||":
+            return CondNode(
+                line_number=_line_from_pos(expr.get("Pos")) or -1,
+                cond_type=CondType.COND_OR.value,
+                op=None,
+                left=left,
+                right=right,
+                invert_return=False,
+            )
+        if not op:
+            raise NotImplementedError(f"Unsupported binary test op: {expr.get('Op')}")
+        return CondNode(
+            line_number=_line_from_pos(expr.get("Pos")) or -1,
+            cond_type=CondType.COND_BINARY.value,
+            op=_string_to_arg_chars(op),
+            left=left,
+            right=right,
+            invert_return=False,
+        )
     if etype == "ParenTest":
-        inner = _test_expr_to_words(expr.get("X"))
-        return [_string_to_arg_chars("(")] + inner + [_string_to_arg_chars(")")]
+        inner = _test_expr_to_cond(cast(dict[str, Any], expr.get("X")))
+        return CondNode(
+            line_number=_line_from_pos(expr.get("Pos")) or -1,
+            cond_type=CondType.COND_EXPR.value,
+            op=None,
+            left=inner,
+            right=None,
+            invert_return=False,
+        )
 
     raise NotImplementedError(f"Unsupported test expr: {etype}")
 
 
 def _test_decl_to_ast(node: dict[str, Any]) -> CommandNode:
     desc = _word_to_string(node.get("Description"))
-    body = _stmt_to_command(node.get("Body"))
+    body = _stmt_to_command(cast(dict[str, Any], node.get("Body")))
     body_str = body.pretty()
     if body.NodeName != "Group":
         body_str = "{ " + body_str + " ; }"
