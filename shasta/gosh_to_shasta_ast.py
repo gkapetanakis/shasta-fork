@@ -404,6 +404,8 @@ def _binary_cmd_to_ast(node: dict[str, Any]) -> AstNode:
     if op == "OrStmt":
         return OrNode(left_operand=left, right_operand=right, no_braces=True)
     if op in ("Pipe", "PipeAll"):
+        if op == "PipeAll":
+            left = _apply_pipe_all(left)
         items = _flatten_pipe_items(left) + _flatten_pipe_items(right)
         return PipeNode(is_background=False, items=items)
 
@@ -965,6 +967,24 @@ def _flatten_pipe_items(node: AstNode) -> list[AstNode]:
     if isinstance(node, PipeNode):
         return list(node.items)
     return [node]
+
+
+def _apply_pipe_all(node: AstNode) -> AstNode:
+    dup = DupRedirNode("ToFD", ("fixed", 2), ("fixed", 1), move=False)
+    return _attach_redirs(node, [dup])
+
+
+def _attach_redirs(node: AstNode, redirs: list[RedirectionNode]) -> AstNode:
+    if isinstance(node, PipeNode) and node.items:
+        node.items[-1] = cast(Command, _attach_redirs(node.items[-1], redirs))
+        return node
+    if isinstance(node, CommandNode):
+        node.redir_list.extend(redirs)
+        return node
+    if isinstance(node, RedirNode):
+        node.redir_list.extend(redirs)
+        return node
+    return RedirNode(line_number=None, node=cast(Command, node), redir_list=redirs)
 
 
 def _stmts_to_command(stmts: list[dict[str, Any]]) -> AstNode:
