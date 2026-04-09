@@ -2,49 +2,57 @@ from __future__ import annotations
 
 import json
 import subprocess
-from typing import Any, Iterable
+from typing import Any, Iterable, cast
 
 from .ast_node import (
-    AstNode,
-    AssignNode,
-    CommandNode,
-    RedirNode,
-    BackgroundNode,
-    NotNode,
-    TimeNode,
-    RedirectionNode,
-    FileRedirNode,
-    DupRedirNode,
-    HeredocRedirNode,
-    SingleArgRedirNode,
-    ArgChar,
-    CArgChar,
-    QArgChar,
     AArgChar,
-    BArgChar,
-    PArgChar,
-    VArgChar,
-    PipeNode,
     AndNode,
-    OrNode,
-    IfNode,
-    WhileNode,
-    ForNode,
-    SelectNode,
-    CaseNode,
-    SubshellNode,
-    GroupNode,
-    DefunNode,
+    ArgChar,
     ArithForNode,
     ArithNode,
+    AssignNode,
+    AstNode,
+    BackgroundNode,
+    BArgChar,
+    CArgChar,
+    CaseNode,
+    Command,
+    CommandNode,
+    CondNode,
+    CondType,
     CoprocNode,
+    DefunNode,
+    DupRedirNode,
+    FileRedirNode,
+    ForNode,
+    GroupNode,
+    HeredocRedirNode,
+    IfNode,
+    NotNode,
+    OrNode,
+    PArgChar,
+    PipeNode,
+    QArgChar,
+    RedirectionNode,
+    RedirNode,
+    SelectNode,
+    SingleArgRedirNode,
+    SubshellNode,
+    TimeNode,
+    VArgChar,
+    WhileNode,
     make_typed_semi_sequence,
     string_of_arg,
 )
 
-# NOTE: This adapter targets shfmt's typed JSON output.
+# This adapter targets shfmt's typed JSON output.
 # Use: shfmt -tojson <script.sh> > ast.json
 # Then: json.load(ast.json) and pass to to_ast_nodes/to_ast_node.
+
+# NOTE: EArgChars are not created by the conversion, instead backslashes are turned into CArgChars
+#       To accurately detect which backslashes are escapes you need more context (which an interpreter would have)
+# NOTE: TArgChars are also not created by the conversion, they are instead turned into CArgChars
+#       Similar to EArgChars, accurate detection would require more context
 
 _SOURCE_BYTES: bytes | None = None
 
@@ -307,7 +315,8 @@ def to_ast_node(obj: Any) -> AstNode:
 
 
 def _stmt_to_command(stmt: dict[str, Any]) -> AstNode:
-    cmd = _command_to_ast(stmt.get("Cmd")) if stmt.get("Cmd") else _empty_command()
+    cmd_node = stmt.get("Cmd")
+    cmd = _command_to_ast(cast(dict[str, Any], cmd_node)) if cmd_node else _empty_command()
     redirs = _to_redirs(stmt.get("Redirs", []))
 
     if stmt.get("Negated"):
@@ -385,7 +394,8 @@ def _call_expr_to_command(node: dict[str, Any]) -> CommandNode:
 
 
 def _binary_cmd_to_ast(node: dict[str, Any]) -> AstNode:
-    op = BIN_CMD_OPS.get(node.get("Op"))
+    op_value = node.get("Op")
+    op = BIN_CMD_OPS.get(op_value) if isinstance(op_value, int) else None
     left = _stmt_to_command(node["X"])
     right = _stmt_to_command(node["Y"])
 
@@ -516,14 +526,14 @@ def _arithm_cmd_to_ast(node: dict[str, Any]) -> ArithNode:
 
 def _time_clause_to_ast(node: dict[str, Any]) -> TimeNode:
     stmt = node.get("Stmt")
-    inner = _stmt_to_command(stmt) if stmt is not None else _empty_command()
+    inner = _stmt_to_command(cast(dict[str, Any], stmt)) if stmt is not None else _empty_command()
     return TimeNode(time_posix=bool(node.get("PosixFormat")), command=inner)
 
 
 def _coproc_clause_to_ast(node: dict[str, Any]) -> CoprocNode:
     name_word = node.get("Name")
     name = _word_to_arg_chars(name_word) if name_word else []
-    inner = _stmt_to_command(node.get("Stmt"))
+    inner = _stmt_to_command(cast(dict[str, Any], node.get("Stmt")))
     return CoprocNode(name=name, body=inner)
 
 
@@ -535,7 +545,8 @@ def _assign_to_shasta(
 
     name = node.get("Name")
     value = node.get("Value")
-    var = name.get("Value") if isinstance(name, dict) else ""
+    name_val = name.get("Value") if isinstance(name, dict) else ""
+    var = name_val if isinstance(name_val, str) else ""
     return AssignNode(var=var, val=_word_to_arg_chars(value) if value else []), None
 
 
@@ -563,15 +574,20 @@ def _word_part_to_arg_chars(part: dict[str, Any]) -> list[ArgChar]:
     if part_type == "ParamExp":
         return _param_exp_to_arg_chars(part)
     if part_type == "CmdSubst":
-        cmd = _stmts_to_command(part.get("Stmts", []))
-        return [BArgChar(cmd)]
+        cmd = cast(Command, _stmts_to_command(cast(list[dict[str, Any]], part.get("Stmts", []))))
+        arg: ArgChar = BArgChar(cmd)
+        return [arg]
     if part_type == "ArithmExp":
-        expr = _arithm_expr_to_string(part.get("X"))
+        expr = _arithm_expr_to_string(cast(dict[str, Any], part.get("X")))
         return [AArgChar(_string_to_arg_chars(expr))]
     if part_type == "ProcSubst":
-        op = PROC_SUBST_OPS.get(part.get("Op"), "<(")
-        cmd = _stmts_to_command(part.get("Stmts", []))
-        return [PArgChar(op, cmd)]
+        op_value = part.get("Op")
+        op = PROC_SUBST_OPS.get(op_value) if isinstance(op_value, int) else None
+        if not op:
+            op = "<("
+        cmd = cast(Command, _stmts_to_command(cast(list[dict[str, Any]], part.get("Stmts", []))))
+        arg: ArgChar = PArgChar(op, cmd)
+        return [arg]
     if part_type == "ExtGlob":
         return _literal_word_part_chars(_extglob_to_string(part))
     if part_type == "BraceExp":
@@ -608,7 +624,10 @@ def _param_exp_to_arg_chars(node: dict[str, Any]) -> list[ArgChar]:
     if exp is None:
         return [VArgChar(fmt="Normal", null=False, var=var, arg=[])]
 
-    op_name = PAR_EXP_OPS.get(exp.get("Op"))
+    op_value = exp.get("Op")
+    op_name = PAR_EXP_OPS.get(op_value) if isinstance(op_value, int) else None
+    if op_name is None:
+        return _param_exp_literal_fallback(node)
     fmt = PAR_EXP_TO_VAR_TYPE.get(op_name)
     if fmt is None:
         return _param_exp_literal_fallback(node)
@@ -646,14 +665,16 @@ def _arithm_expr_to_string(expr: dict[str, Any]) -> str:
     if expr_type == "Word":
         return string_of_arg(_word_to_arg_chars(expr))
     if expr_type == "BinaryArithm":
-        op = ARITH_TOKEN_STR.get(expr.get("Op"))
+        op_value = expr.get("Op")
+        op = ARITH_TOKEN_STR.get(op_value) if isinstance(op_value, int) else None
         if not op:
             raise NotImplementedError(f"Unsupported arithmetic op: {expr.get('Op')}")
         left = _arithm_expr_to_string(expr["X"])
         right = _arithm_expr_to_string(expr["Y"])
         return f"{left} {op} {right}"
     if expr_type == "UnaryArithm":
-        op = ARITH_TOKEN_STR.get(expr.get("Op"))
+        op_value = expr.get("Op")
+        op = ARITH_TOKEN_STR.get(op_value) if isinstance(op_value, int) else None
         if not op:
             raise NotImplementedError(f"Unsupported unary arithmetic op: {expr.get('Op')}")
         inner = _arithm_expr_to_string(expr["X"])
@@ -672,14 +693,15 @@ def _to_redirs(redirs: Iterable[dict[str, Any]]) -> list[RedirectionNode]:
 
 
 def _redir_to_node(redir: dict[str, Any]) -> RedirectionNode:
-    op_name = REDIR_OPS.get(redir.get("Op"))
+    op_value = redir.get("Op")
+    op_name = REDIR_OPS.get(op_value) if isinstance(op_value, int) else None
     if not op_name:
         raise NotImplementedError(f"Unsupported redirection op: {redir.get('Op')}")
 
     default_fd = 0 if op_name in ("RdrIn", "RdrInOut", "DplIn", "Hdoc", "DashHdoc", "WordHdoc") else 1
     fd = _redir_fd(redir.get("N"), default_fd)
-    word = redir.get("Word")
-    heredoc = redir.get("Hdoc")
+    word = cast(dict[str, Any], redir.get("Word"))
+    heredoc = cast(dict[str, Any], redir.get("Hdoc"))
 
     if op_name == "RdrOut":
         return FileRedirNode("To", fd, _word_to_arg_chars(word))
@@ -689,9 +711,9 @@ def _redir_to_node(redir: dict[str, Any]) -> RedirectionNode:
         return FileRedirNode("From", fd, _word_to_arg_chars(word))
     if op_name == "RdrInOut":
         return FileRedirNode("FromTo", fd, _word_to_arg_chars(word))
-    if op_name in ("RdrClob", "RdrTrunc"):
+    if op_name == "RdrClob":
         return FileRedirNode("Clobber", fd, _word_to_arg_chars(word))
-    if op_name in ("AppClob", "AppTrunc"):
+    if op_name == "AppClob":
         return FileRedirNode("Append", fd, _word_to_arg_chars(word))
     if op_name in ("Hdoc", "DashHdoc"):
         delimiter = string_of_arg(_word_to_arg_chars(word))
@@ -710,9 +732,9 @@ def _redir_to_node(redir: dict[str, Any]) -> RedirectionNode:
         if _word_lit_equals(word, "-"):
             return SingleArgRedirNode("CloseThis", fd)
         return DupRedirNode(dup_type, fd, _redir_arg(word))
-    if op_name in ("RdrAll", "RdrAllClob", "RdrAllTrunc"):
+    if op_name in ("RdrAll", "RdrAllClob"):
         return SingleArgRedirNode("ErrAndOut", ("var", _word_to_arg_chars(word)))
-    if op_name in ("AppAll", "AppAllClob", "AppAllTrunc"):
+    if op_name in ("AppAll", "AppAllClob"):
         return SingleArgRedirNode("AppendErrAndOut", ("var", _word_to_arg_chars(word)))
 
     raise NotImplementedError(f"Unsupported redirection op: {op_name}")
@@ -763,7 +785,9 @@ def _word_has_quotes(word: dict[str, Any] | None) -> bool:
 
 
 def _word_to_string(word: dict[str, Any] | None) -> str:
-    return string_of_arg(_word_to_arg_chars(word))
+    if not word:
+        return ""
+    return string_of_arg(_word_to_arg_chars(cast(dict[str, Any], word)))
 
 
 def _assign_to_word_text(node: dict[str, Any]) -> str:
@@ -867,12 +891,12 @@ def _param_exp_to_string(node: dict[str, Any]) -> str:
         with_str = _word_to_string(with_word) if with_word else ""
         buf += f"/{orig}/{with_str}"
     if names:
-        # Names operator is encoded as a token.
-        op = "*" if names == 1 else "@"
+        op = PAR_NAMES_OP_STR.get(names, "@")
         buf = "${!" + name + op
     if exp:
-        op_name = PAR_EXP_OPS.get(exp.get("Op"))
-        op_str = PAR_EXP_OP_STR.get(op_name, "")
+        op_value = exp.get("Op")
+        op_name = PAR_EXP_OPS.get(op_value) if isinstance(op_value, int) else None
+        op_str = PAR_EXP_OP_STR.get(op_name, "") if op_name else ""
         buf += f"{op_str}{_word_to_string(exp.get('Word'))}"
 
     buf += "}"
@@ -880,13 +904,15 @@ def _param_exp_to_string(node: dict[str, Any]) -> str:
 
 
 def _proc_subst_to_string(node: dict[str, Any]) -> str:
-    op = PROC_SUBST_OPS.get(node.get("Op"), "<(")
-    cmd = _stmts_to_command(node.get("Stmts", []))
+    op_value = node.get("Op")
+    op = PROC_SUBST_OPS.get(op_value) if isinstance(op_value, int) else "<("
+    cmd = _stmts_to_command(cast(list[dict[str, Any]], node.get("Stmts", [])))
     return f"{op}{cmd.pretty()})"
 
 
 def _extglob_to_string(node: dict[str, Any]) -> str:
-    op = GLOB_OPS.get(node.get("Op"), "?(")
+    op_value = node.get("Op")
+    op = GLOB_OPS.get(op_value) if isinstance(op_value, int) else "?("
     pattern = node.get("Pattern", {}).get("Value", "")
     return f"{op}{pattern})"
 
